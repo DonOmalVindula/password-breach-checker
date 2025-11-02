@@ -1,103 +1,108 @@
-const express = require('express');
-const crypto = require('crypto');
+import express from "express";
+import crypto from "node:crypto";
+import validator from "validator";
+import axios from "axios";
+import { json } from "express";
 
 const app = express();
-app.use(express.json());
 
-// Function to hash password and check against HIBP
-async function isPasswordPwned(password) {
-  // Generate SHA-1 hash of the password
-  const hash = crypto
-    .createHash('sha1')
-    .update(password)
-    .digest('hex')
-    .toUpperCase();
-  
-  // Extract first 5 characters for k-anonymity
-  const prefix = hash.substring(0, 5);
-  const suffix = hash.substring(5);
-  
-  try {
-    // Query HIBP API with the prefix
-    const response = await fetch(
-      `https://api.pwnedpasswords.com/range/${prefix}`,
-      {
-        headers: {
-          'User-Agent': 'Asgardeo-Password-Breach-Checker'
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+
+app.use(json({ limit: "100kb" }));
+
+app.get("/", (_req, res) => {
+    res.json({
+        message: "🔐 HIBP Proxy API is up and running!",
+        usage: {
+            POST: "/password-check",
+            docs: "https://haveibeenpwned.com/API/v3#PwnedPasswords"
+        },
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.post("/password-check", async (req, res) => {
+    try {
+        if (!validator.isJSON(JSON.stringify(req.body))) {
+            return res.status(400).json({
+                actionStatus: "ERROR",
+                error: "invalid_request",
+                errorDescription: "Invalid JSON payload."
+            });
         }
-      }
-    );
-    
-    if (!response.ok) {
-      throw new Error(`HIBP API returned status ${response.status}`);
-    }
-    
-    const data = await response.text();
-    
-    // Check if our hash suffix appears in the response
-    const hashes = data.split('\n');
-    for (const line of hashes) {
-      const [hashSuffix, count] = line.split(':');
-      if (hashSuffix === suffix) {
-        return {
-          isPwned: true,
-          breachCount: parseInt(count)
-        };
-      }
-    }
-    
-    return { isPwned: false, breachCount: 0 };
-  } catch (error) {
-    console.error('Error checking HIBP:', error);
-    // In case of API failure, allow the password (fail open)
-    return { isPwned: false, breachCount: 0 };
-  }
-}
 
-// Pre-Update Password Action endpoint
-app.post('/check-password', async (req, res) => {
-  try {
-    const { event, user, password } = req.body;
-    
-    // Validate the request
-    if (!password || !password.newPassword) {
-      return res.status(400).json({
-        actionStatus: 'FAILED',
-        message: 'Invalid request format'
-      });
+        const cred = req.body?.event?.user?.updatingCredential;
+        if (!cred || cred.type !== "PASSWORD") {
+            return res.status(400).json({
+                actionStatus: "ERROR",
+                error: "invalid_credential",
+                errorDescription: "No password credential found."
+            });
+        }
+
+        // Handle encrypted (base64-encoded) or plain text passwords
+        let plain = cred.value;
+        if (cred.format === "HASH") {
+            try {
+                plain = Buffer.from(cred.value, "base64").toString("utf8");
+            } catch {
+                return res.status(400).json({
+                    actionStatus: "ERROR",
+                    error: "invalid_credential",
+                    errorDescription: "Expects the encrypted credential."
+                });
+            }
+        }
+
+        const sha1 = crypto.createHash("sha1").update(plain).digest("hex").toUpperCase();
+        const prefix = sha1.slice(0, 5);
+        const suffix = sha1.slice(5);
+
+        const hibpResp = await axios.get(
+            `https://api.pwnedpasswords.com/range/${prefix}`,
+            {
+                headers: {
+                    "Add-Padding": "true",
+                    "User-Agent": "asgardeo-hibp-checker"
+                }
+            }
+        );
+
+        const hitLine = hibpResp.data
+            .split("\n")
+            .find((line) => line.startsWith(suffix));
+
+        const count = hitLine ? parseInt(hitLine.split(":")[1], 10) : 0;
+
+        if (count > 0) {
+            return res.status(200).json({
+                actionStatus: "FAILED",
+                failureReason: "password_compromised",
+                failureDescription: `This password has appeared in ${count.toLocaleString()} data breaches. Please choose a different password.`
+            });
+        }
+
+        return res.json({ actionStatus: "SUCCESS" });
+    } catch (err) {
+        console.error("🔥", err);
+        const status = err.response?.status || 500;
+        const msg =
+            status === 429
+                ? "External HIBP rate limit hit—try again in a few seconds."
+                : err.message || "Unexpected server error";
+        res.status(status).json({ 
+            actionStatus: "ERROR",
+            error: "service_error",
+            errorDescription: msg 
+        });
     }
-    
-    // Check if password has been pwned
-    const result = await isPasswordPwned(password.newPassword);
-    
-    if (result.isPwned) {
-      return res.json({
-        actionStatus: 'FAILED',
-        message: `This password has appeared in ${result.breachCount.toLocaleString()} data breaches. Please choose a different password.`,
-        failureReason: 'PASSWORD_COMPROMISED'
-      });
-    }
-    
-    // Password is safe
-    return res.json({
-      actionStatus: 'SUCCESS'
-    });
-    
-  } catch (error) {
-    console.error('Error processing request:', error);
-    return res.status(500).json({
-      actionStatus: 'FAILED',
-      message: 'An error occurred while validating the password'
-    });
-  }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
-});
-
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Password breach checker service running on port ${PORT}`);
+    console.log(
+        `🚀  HIBP Proxy API server started on http://localhost:${PORT} — ` +
+        "press Ctrl+C to stop"
+    );
 });
+
+export default app;
