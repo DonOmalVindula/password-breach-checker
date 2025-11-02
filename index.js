@@ -29,10 +29,7 @@ app.get("/", (_req, res) => {
 
 app.post("/password-check", async (req, res) => {
     try {
-        console.log("📥 Request received:", JSON.stringify(req.body, null, 2));
-
         if (!req.body || !validator.isJSON(JSON.stringify(req.body))) {
-            console.log("❌ Invalid JSON");
             return res.status(400).json({
                 actionStatus: "ERROR",
                 error: "invalid_request",
@@ -42,7 +39,6 @@ app.post("/password-check", async (req, res) => {
 
         const cred = req.body?.event?.user?.updatingCredential;
         if (!cred || cred.type !== "PASSWORD") {
-            console.log("❌ No password credential");
             return res.status(400).json({
                 actionStatus: "ERROR",
                 error: "invalid_credential",
@@ -55,9 +51,7 @@ app.post("/password-check", async (req, res) => {
         if (cred.format === "HASH") {
             try {
                 plain = Buffer.from(cred.value, "base64").toString("utf8");
-                console.log("✅ Decoded password");
             } catch (err) {
-                console.log("❌ Failed to decode:", err.message);
                 return res.status(400).json({
                     actionStatus: "ERROR",
                     error: "invalid_credential",
@@ -69,8 +63,6 @@ app.post("/password-check", async (req, res) => {
         const sha1 = crypto.createHash("sha1").update(plain).digest("hex").toUpperCase();
         const prefix = sha1.slice(0, 5);
         const suffix = sha1.slice(5);
-
-        console.log("🔍 Checking HIBP...");
 
         const hibpResp = await axios.get(
             `https://api.pwnedpasswords.com/range/${prefix}`,
@@ -90,23 +82,20 @@ app.post("/password-check", async (req, res) => {
         const count = hitLine ? parseInt(hitLine.split(":")[1], 10) : 0;
 
         if (count > 0) {
-            console.log(`❌ Password compromised: ${count} breaches`);
             const failureResponse = {
                 actionStatus: "FAILED",
                 failureReason: "password_compromised",
                 failureDescription: "The provided password is compromised."
             };
-            console.log("📤 Sending:", JSON.stringify(failureResponse));
+
             return res.status(200).json(failureResponse);
         }
 
-        console.log("✅ Password safe");
         const successResponse = { actionStatus: "SUCCESS" };
-        console.log("📤 Sending:", JSON.stringify(successResponse));
+
         return res.status(200).json(successResponse);
         
     } catch (err) {
-        console.error("🔥 Error:", err.message);
         console.error(err.stack);
         
         const status = err.response?.status || 500;
@@ -119,7 +108,7 @@ app.post("/password-check", async (req, res) => {
             error: "service_error",
             errorDescription: msg
         };
-        console.log("📤 Error response:", JSON.stringify(errorResponse));
+        
         return res.status(500).json(errorResponse);
     }
 });
